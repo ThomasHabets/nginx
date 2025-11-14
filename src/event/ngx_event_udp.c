@@ -39,8 +39,9 @@ ngx_event_recvmsg(ngx_event_t *ev)
     ngx_connection_t  *c, *lc;
     static u_char      buffer[65535];
 
-#if (NGX_HAVE_ADDRINFO_CMSG)
-    u_char             msg_control[CMSG_SPACE(sizeof(ngx_addrinfo_t))];
+#if (NGX_HAVE_MSGHDR_MSG_CONTROL                                         \
+    && (NGX_HAVE_ADDRINFO_CMSG || NGX_HAVE_UNIX_DOMAIN))
+    u_char             msg_control[NGX_UDP_CMSG_SIZE];
 #endif
 
     if (ev->timedout) {
@@ -75,12 +76,27 @@ ngx_event_recvmsg(ngx_event_t *ev)
         msg.msg_iov = iov;
         msg.msg_iovlen = 1;
 
-#if (NGX_HAVE_ADDRINFO_CMSG)
-        if (ls->wildcard) {
-            msg.msg_control = &msg_control;
-            msg.msg_controllen = sizeof(msg_control);
+#if (NGX_HAVE_MSGHDR_MSG_CONTROL                                         \
+    && (NGX_HAVE_ADDRINFO_CMSG || NGX_HAVE_UNIX_DOMAIN))
+        msg.msg_control = NULL;
+        msg.msg_controllen = 0;
 
-            ngx_memzero(&msg_control, sizeof(msg_control));
+#if (NGX_HAVE_UNIX_DOMAIN)
+        if (ls->sockaddr->sa_family == AF_UNIX) {
+            msg.msg_control = msg_control;
+            msg.msg_controllen = sizeof(msg_control);
+        }
+#endif
+
+#if (NGX_HAVE_ADDRINFO_CMSG)
+        if (msg.msg_control == NULL && ls->wildcard) {
+            msg.msg_control = msg_control;
+            msg.msg_controllen = sizeof(msg_control);
+        }
+#endif
+
+        if (msg.msg_control) {
+            ngx_memzero(msg_control, sizeof(msg_control));
         }
 #endif
 
@@ -100,8 +116,103 @@ ngx_event_recvmsg(ngx_event_t *ev)
             return;
         }
 
+#if (NGX_HAVE_MSGHDR_MSG_CONTROL && NGX_HAVE_UNIX_DOMAIN)
+        if (ls->sockaddr->sa_family == AF_UNIX && msg.msg_control) {
+            struct cmsghdr           *cmsg;
+            ngx_socket_t              passed_fd;
+            int                       fd;
+            struct sockaddr_storage   ps, lsock;
+            socklen_t                 plen, llen;
+
+            passed_fd = (ngx_socket_t) -1;
+
+            for (cmsg = CMSG_FIRSTHDR(&msg);
+                 cmsg != NULL;
+                 cmsg = CMSG_NXTHDR(&msg, cmsg))
+            {
+                if (cmsg->cmsg_level != SOL_SOCKET
+                    || cmsg->cmsg_type != SCM_RIGHTS)
+                {
+                    continue;
+                }
+
+                if (cmsg->cmsg_len < (socklen_t) CMSG_LEN(sizeof(int))) {
+                    ngx_log_error(NGX_LOG_ALERT, ev->log, 0,
+                                  "recvmsg() returned too small ancillary "
+                                  "data for SCM_RIGHTS");
+                    break;
+                }
+
+                ngx_memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+                passed_fd = (ngx_socket_t) fd;
+                break;
+            }
+
+            if (passed_fd != (ngx_socket_t) -1) {
+
+                if (msg.msg_flags & MSG_CTRUNC) {
+                    ngx_log_error(NGX_LOG_ALERT, ev->log, 0,
+                                  "recvmsg() truncated ancillary data");
+                    if (ngx_close_socket(passed_fd) == -1) {
+                        ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                                      ngx_close_socket_n " failed");
+                    }
+                    continue;
+                }
+
+                plen = sizeof(ps);
+                if (getpeername(passed_fd, (struct sockaddr *) &ps, &plen)
+                    == -1)
+                {
+                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                                  "getpeername() failed for passed connection");
+                    if (ngx_close_socket(passed_fd) == -1) {
+                        ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                                      ngx_close_socket_n " failed");
+                    }
+                    continue;
+                }
+
+                llen = sizeof(lsock);
+                if (getsockname(passed_fd, (struct sockaddr *) &lsock, &llen)
+                    == -1)
+                {
+                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                                  "getsockname() failed for passed connection");
+                    if (ngx_close_socket(passed_fd) == -1) {
+                        ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                                      ngx_close_socket_n " failed");
+                    }
+                    continue;
+                }
+
+#if (NGX_STAT_STUB)
+                (void) ngx_atomic_fetch_add(ngx_stat_accepted, 1);
+#endif
+
+                ngx_accept_disabled = ngx_cycle->connection_n / 8
+                                      - ngx_cycle->free_connection_n;
+
+                if (ngx_event_accept_connection(ev, passed_fd, SOCK_STREAM,
+                                                (struct sockaddr *) &ps, plen,
+                                                (struct sockaddr *) &lsock,
+                                                llen, 1, ecf)
+                    != NGX_OK)
+                {
+                    return;
+                }
+
+                if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
+                    ev->available--;
+                }
+
+                continue;
+            }
+        }
+#endif
+
 #if (NGX_HAVE_ADDRINFO_CMSG)
-        if (msg.msg_flags & (MSG_TRUNC|MSG_CTRUNC)) {
+        if (ls->wildcard && (msg.msg_flags & (MSG_TRUNC|MSG_CTRUNC))) {
             ngx_log_error(NGX_LOG_ALERT, ev->log, 0,
                           "recvmsg() truncated data");
             continue;

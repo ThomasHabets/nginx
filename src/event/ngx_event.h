@@ -494,6 +494,10 @@ extern ngx_module_t           ngx_event_core_module;
 
 
 void ngx_event_accept(ngx_event_t *ev);
+ngx_int_t ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s, int type,
+    struct sockaddr *sockaddr, socklen_t socklen,
+    struct sockaddr *local_sockaddr, socklen_t local_socklen,
+    ngx_uint_t local_copy, ngx_event_conf_t *ecf);
 ngx_int_t ngx_trylock_accept_mutex(ngx_cycle_t *cycle);
 ngx_int_t ngx_enable_accept_events(ngx_cycle_t *cycle);
 u_char *ngx_accept_log_error(ngx_log_t *log, u_char *buf, size_t len);

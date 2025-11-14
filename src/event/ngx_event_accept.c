@@ -15,6 +15,10 @@ static ngx_int_t ngx_disable_accept_events(ngx_cycle_t *cycle, ngx_uint_t all);
 static void ngx_reorder_accept_events(ngx_listening_t *ls);
 #endif
 static void ngx_close_accepted_connection(ngx_connection_t *c);
+ngx_int_t ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s,
+    int type, struct sockaddr *sockaddr, socklen_t socklen,
+    struct sockaddr *local_sockaddr, socklen_t local_socklen,
+    ngx_uint_t local_copy, ngx_event_conf_t *ecf);
 
 
 void
@@ -22,13 +26,11 @@ ngx_event_accept(ngx_event_t *ev)
 {
     socklen_t          socklen;
     ngx_err_t          err;
-    ngx_log_t         *log;
     ngx_uint_t         level;
     ngx_socket_t       s;
-    ngx_event_t       *rev, *wev;
     ngx_sockaddr_t     sa;
     ngx_listening_t   *ls;
-    ngx_connection_t  *c, *lc;
+    ngx_connection_t  *lc;
     ngx_event_conf_t  *ecf;
 #if (NGX_HAVE_ACCEPT4)
     static ngx_uint_t  use_accept4 = 1;
@@ -139,195 +141,13 @@ ngx_event_accept(ngx_event_t *ev)
         ngx_accept_disabled = ngx_cycle->connection_n / 8
                               - ngx_cycle->free_connection_n;
 
-        c = ngx_get_connection(s, ev->log);
-
-        if (c == NULL) {
-            if (ngx_close_socket(s) == -1) {
-                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                              ngx_close_socket_n " failed");
-            }
-
-            return;
-        }
-
-        c->type = SOCK_STREAM;
-
-#if (NGX_STAT_STUB)
-        (void) ngx_atomic_fetch_add(ngx_stat_active, 1);
-#endif
-
-        c->pool = ngx_create_pool(ls->pool_size, ev->log);
-        if (c->pool == NULL) {
-            ngx_close_accepted_connection(c);
-            return;
-        }
-
-        if (socklen > (socklen_t) sizeof(ngx_sockaddr_t)) {
-            socklen = sizeof(ngx_sockaddr_t);
-        }
-
-        c->sockaddr = ngx_palloc(c->pool, socklen);
-        if (c->sockaddr == NULL) {
-            ngx_close_accepted_connection(c);
-            return;
-        }
-
-        ngx_memcpy(c->sockaddr, &sa, socklen);
-
-        log = ngx_palloc(c->pool, sizeof(ngx_log_t));
-        if (log == NULL) {
-            ngx_close_accepted_connection(c);
-            return;
-        }
-
-        /* set a blocking mode for iocp and non-blocking mode for others */
-
-        if (ngx_inherited_nonblocking) {
-            if (ngx_event_flags & NGX_USE_IOCP_EVENT) {
-                if (ngx_blocking(s) == -1) {
-                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                                  ngx_blocking_n " failed");
-                    ngx_close_accepted_connection(c);
-                    return;
-                }
-            }
-
-        } else {
-            if (!(ngx_event_flags & NGX_USE_IOCP_EVENT)) {
-                if (ngx_nonblocking(s) == -1) {
-                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                                  ngx_nonblocking_n " failed");
-                    ngx_close_accepted_connection(c);
-                    return;
-                }
-            }
-        }
-
-#if (NGX_HAVE_KEEPALIVE_TUNABLE && NGX_DARWIN)
-
-        /* Darwin doesn't inherit TCP_KEEPALIVE from a listening socket */
-
-        if (ls->keepidle) {
-            if (setsockopt(s, IPPROTO_TCP, TCP_KEEPALIVE,
-                           (const void *) &ls->keepidle, sizeof(int))
-                == -1)
-            {
-                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                              "setsockopt(TCP_KEEPALIVE, %d) failed, ignored",
-                              ls->keepidle);
-            }
-        }
-
-#endif
-
-        *log = ls->log;
-
-        c->recv = ngx_recv;
-        c->send = ngx_send;
-        c->recv_chain = ngx_recv_chain;
-        c->send_chain = ngx_send_chain;
-
-        c->log = log;
-        c->pool->log = log;
-
-        c->socklen = socklen;
-        c->listening = ls;
-        c->local_sockaddr = ls->sockaddr;
-        c->local_socklen = ls->socklen;
-
-#if (NGX_HAVE_UNIX_DOMAIN)
-        if (c->sockaddr->sa_family == AF_UNIX) {
-            c->tcp_nopush = NGX_TCP_NOPUSH_DISABLED;
-            c->tcp_nodelay = NGX_TCP_NODELAY_DISABLED;
-#if (NGX_SOLARIS)
-            /* Solaris's sendfilev() supports AF_NCA, AF_INET, and AF_INET6 */
-            c->sendfile = 0;
-#endif
-        }
-#endif
-
-        rev = c->read;
-        wev = c->write;
-
-        wev->ready = 1;
-
-        if (ngx_event_flags & NGX_USE_IOCP_EVENT) {
-            rev->ready = 1;
-        }
-
-        if (ev->deferred_accept) {
-            rev->ready = 1;
-#if (NGX_HAVE_KQUEUE || NGX_HAVE_EPOLLRDHUP)
-            rev->available = 1;
-#endif
-        }
-
-        rev->log = log;
-        wev->log = log;
-
-        /*
-         * TODO: MT: - ngx_atomic_fetch_add()
-         *             or protection by critical section or light mutex
-         *
-         * TODO: MP: - allocated in a shared memory
-         *           - ngx_atomic_fetch_add()
-         *             or protection by critical section or light mutex
-         */
-
-        c->number = ngx_atomic_fetch_add(ngx_connection_counter, 1);
-
-        c->start_time = ngx_current_msec;
-
-#if (NGX_STAT_STUB)
-        (void) ngx_atomic_fetch_add(ngx_stat_handled, 1);
-#endif
-
-        if (ls->addr_ntop) {
-            c->addr_text.data = ngx_pnalloc(c->pool, ls->addr_text_max_len);
-            if (c->addr_text.data == NULL) {
-                ngx_close_accepted_connection(c);
-                return;
-            }
-
-            c->addr_text.len = ngx_sock_ntop(c->sockaddr, c->socklen,
-                                             c->addr_text.data,
-                                             ls->addr_text_max_len, 0);
-            if (c->addr_text.len == 0) {
-                ngx_close_accepted_connection(c);
-                return;
-            }
-        }
-
-#if (NGX_DEBUG)
+        if (ngx_event_accept_connection(ev, s, SOCK_STREAM, &sa.sockaddr,
+                                        socklen, ls->sockaddr, ls->socklen, 0,
+                                        ecf)
+            != NGX_OK)
         {
-        ngx_str_t  addr;
-        u_char     text[NGX_SOCKADDR_STRLEN];
-
-        ngx_debug_accepted_connection(ecf, c);
-
-        if (log->log_level & NGX_LOG_DEBUG_EVENT) {
-            addr.data = text;
-            addr.len = ngx_sock_ntop(c->sockaddr, c->socklen, text,
-                                     NGX_SOCKADDR_STRLEN, 1);
-
-            ngx_log_debug3(NGX_LOG_DEBUG_EVENT, log, 0,
-                           "*%uA accept: %V fd:%d", c->number, &addr, s);
+            return;
         }
-
-        }
-#endif
-
-        if (ngx_add_conn && (ngx_event_flags & NGX_USE_EPOLL_EVENT) == 0) {
-            if (ngx_add_conn(c) == NGX_ERROR) {
-                ngx_close_accepted_connection(c);
-                return;
-            }
-        }
-
-        log->data = NULL;
-        log->handler = NULL;
-
-        ls->handler(c);
 
         if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
             ev->available--;
@@ -493,6 +313,257 @@ ngx_reorder_accept_events(ngx_listening_t *ls)
 }
 
 #endif
+
+
+ngx_int_t
+ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s, int type,
+    struct sockaddr *sockaddr, socklen_t socklen,
+    struct sockaddr *local_sockaddr, socklen_t local_socklen,
+    ngx_uint_t local_copy, ngx_event_conf_t *ecf)
+{
+    ngx_log_t         *log;
+    ngx_event_t       *rev, *wev;
+    ngx_connection_t  *c, *lc;
+    ngx_listening_t   *ls;
+    socklen_t          len, llen;
+
+    lc = ev->data;
+    ls = lc->listening;
+
+    c = ngx_get_connection(s, ev->log);
+
+    if (c == NULL) {
+        if (ngx_close_socket(s) == -1) {
+            ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                          ngx_close_socket_n " failed");
+        }
+
+        return NGX_ERROR;
+    }
+
+    c->type = type;
+
+#if (NGX_STAT_STUB)
+    (void) ngx_atomic_fetch_add(ngx_stat_active, 1);
+#endif
+
+    c->pool = ngx_create_pool(ls->pool_size, ev->log);
+    if (c->pool == NULL) {
+        ngx_close_accepted_connection(c);
+        return NGX_ERROR;
+    }
+
+    len = socklen;
+
+    if (len > (socklen_t) sizeof(ngx_sockaddr_t)) {
+        len = sizeof(ngx_sockaddr_t);
+    }
+
+    c->sockaddr = ngx_palloc(c->pool, len);
+    if (c->sockaddr == NULL) {
+        ngx_close_accepted_connection(c);
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(c->sockaddr, sockaddr, len);
+    c->socklen = len;
+    c->listening = ls;
+
+    if (local_copy) {
+        llen = local_socklen;
+
+        if (llen > (socklen_t) sizeof(ngx_sockaddr_t)) {
+            llen = sizeof(ngx_sockaddr_t);
+        }
+
+        c->local_sockaddr = ngx_palloc(c->pool, llen);
+        if (c->local_sockaddr == NULL) {
+            ngx_close_accepted_connection(c);
+            return NGX_ERROR;
+        }
+
+        ngx_memcpy(c->local_sockaddr, local_sockaddr, llen);
+        c->local_socklen = llen;
+
+    } else {
+        c->local_sockaddr = local_sockaddr;
+        c->local_socklen = local_socklen;
+    }
+
+    log = ngx_palloc(c->pool, sizeof(ngx_log_t));
+    if (log == NULL) {
+        ngx_close_accepted_connection(c);
+        return NGX_ERROR;
+    }
+
+    /* set a blocking mode for iocp and non-blocking mode for others */
+
+    if (ngx_inherited_nonblocking) {
+        if (ngx_event_flags & NGX_USE_IOCP_EVENT) {
+            if (ngx_blocking(s) == -1) {
+                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                              ngx_blocking_n " failed");
+                ngx_close_accepted_connection(c);
+                return NGX_ERROR;
+            }
+        }
+
+    } else {
+        if (!(ngx_event_flags & NGX_USE_IOCP_EVENT)) {
+            if (ngx_nonblocking(s) == -1) {
+                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                              ngx_nonblocking_n " failed");
+                ngx_close_accepted_connection(c);
+                return NGX_ERROR;
+            }
+        }
+    }
+
+#if (NGX_HAVE_KEEPALIVE_TUNABLE && NGX_DARWIN)
+
+    /* Darwin doesn't inherit TCP_KEEPALIVE from a listening socket */
+
+    if (ls->keepidle) {
+        if (setsockopt(s, IPPROTO_TCP, TCP_KEEPALIVE,
+                       (const void *) &ls->keepidle, sizeof(int))
+            == -1)
+        {
+            ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                          "setsockopt(TCP_KEEPALIVE, %d) failed, ignored",
+                          ls->keepidle);
+        }
+    }
+
+    if (ls->keepintvl) {
+        if (setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL,
+                       (const void *) &ls->keepintvl, sizeof(int))
+            == -1)
+        {
+            ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                          "setsockopt(TCP_KEEPINTVL, %d) failed, ignored",
+                          ls->keepintvl);
+        }
+    }
+
+    if (ls->keepcnt) {
+        if (setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT,
+                       (const void *) &ls->keepcnt, sizeof(int))
+            == -1)
+        {
+            ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                          "setsockopt(TCP_KEEPCNT, %d) failed, ignored",
+                          ls->keepcnt);
+        }
+
+    }
+
+#endif
+
+    *log = ls->log;
+
+    c->recv = ngx_recv;
+    c->send = ngx_send;
+    c->recv_chain = ngx_recv_chain;
+    c->send_chain = ngx_send_chain;
+
+    c->log = log;
+    c->pool->log = log;
+
+#if (NGX_HAVE_UNIX_DOMAIN)
+    if (c->sockaddr->sa_family == AF_UNIX) {
+        c->tcp_nopush = NGX_TCP_NOPUSH_DISABLED;
+        c->tcp_nodelay = NGX_TCP_NODELAY_DISABLED;
+#if (NGX_SOLARIS)
+        /* Solaris's sendfilev() supports AF_NCA, AF_INET, and AF_INET6 */
+        c->sendfile = 0;
+#endif
+    }
+#endif
+
+    rev = c->read;
+    wev = c->write;
+
+    wev->ready = 1;
+
+    if (ngx_event_flags & NGX_USE_IOCP_EVENT) {
+        rev->ready = 1;
+    }
+
+    if (ev->deferred_accept) {
+        rev->ready = 1;
+#if (NGX_HAVE_KQUEUE || NGX_HAVE_EPOLLRDHUP)
+        rev->available = 1;
+#endif
+    }
+
+    rev->log = log;
+    wev->log = log;
+
+    /*
+     * TODO: MT: - ngx_atomic_fetch_add()
+     *             or protection by critical section or light mutex
+     *
+     * TODO: MP: - allocated in a shared memory
+     *           - ngx_atomic_fetch_add()
+     *             or protection by critical section or light mutex
+     */
+
+    c->number = ngx_atomic_fetch_add(ngx_connection_counter, 1);
+
+    c->start_time = ngx_current_msec;
+
+#if (NGX_STAT_STUB)
+    (void) ngx_atomic_fetch_add(ngx_stat_handled, 1);
+#endif
+
+    if (ls->addr_ntop) {
+        c->addr_text.data = ngx_pnalloc(c->pool, ls->addr_text_max_len);
+        if (c->addr_text.data == NULL) {
+            ngx_close_accepted_connection(c);
+            return NGX_ERROR;
+        }
+
+        c->addr_text.len = ngx_sock_ntop(c->sockaddr, c->socklen,
+                                         c->addr_text.data,
+                                         ls->addr_text_max_len, 0);
+        if (c->addr_text.len == 0) {
+            ngx_close_accepted_connection(c);
+            return NGX_ERROR;
+        }
+    }
+
+#if (NGX_DEBUG)
+    ngx_debug_accepted_connection(ecf, c);
+
+    if (log->log_level & NGX_LOG_DEBUG_EVENT) {
+        ngx_str_t  addr;
+        u_char     text[NGX_SOCKADDR_STRLEN];
+
+        addr.data = text;
+        addr.len = ngx_sock_ntop(c->sockaddr, c->socklen, text,
+                                 NGX_SOCKADDR_STRLEN, 1);
+
+        ngx_log_debug3(NGX_LOG_DEBUG_EVENT, log, 0,
+                       "*%uA accept: %V fd:%d", c->number, &addr, s);
+    }
+#else
+    (void) ecf;
+#endif
+
+    if (ngx_add_conn && (ngx_event_flags & NGX_USE_EPOLL_EVENT) == 0) {
+        if (ngx_add_conn(c) == NGX_ERROR) {
+            ngx_close_accepted_connection(c);
+            return NGX_ERROR;
+        }
+    }
+
+    log->data = NULL;
+    log->handler = NULL;
+
+    ls->handler(c);
+
+    return NGX_OK;
+}
 
 
 static void
