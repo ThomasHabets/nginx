@@ -18,7 +18,8 @@ static void ngx_close_accepted_connection(ngx_connection_t *c);
 ngx_int_t ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s,
     int type, struct sockaddr *sockaddr, socklen_t socklen,
     struct sockaddr *local_sockaddr, socklen_t local_socklen,
-    ngx_uint_t local_copy, ngx_event_conf_t *ecf);
+    ngx_uint_t local_copy, ngx_event_conf_t *ecf,
+    ngx_connection_t **pconn, ngx_uint_t defer_handler);
 
 
 void
@@ -143,7 +144,7 @@ ngx_event_accept(ngx_event_t *ev)
 
         if (ngx_event_accept_connection(ev, s, SOCK_STREAM, &sa.sockaddr,
                                         socklen, ls->sockaddr, ls->socklen, 0,
-                                        ecf)
+                                        ecf, NULL, 0)
             != NGX_OK)
         {
             return;
@@ -319,7 +320,8 @@ ngx_int_t
 ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s, int type,
     struct sockaddr *sockaddr, socklen_t socklen,
     struct sockaddr *local_sockaddr, socklen_t local_socklen,
-    ngx_uint_t local_copy, ngx_event_conf_t *ecf)
+    ngx_uint_t local_copy, ngx_event_conf_t *ecf,
+    ngx_connection_t **pconn, ngx_uint_t defer_handler)
 {
     ngx_log_t         *log;
     ngx_event_t       *rev, *wev;
@@ -557,10 +559,16 @@ ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s, int type,
         }
     }
 
+    if (pconn) {
+        *pconn = c;
+    }
+
     log->data = NULL;
     log->handler = NULL;
 
-    ls->handler(c);
+    if (!defer_handler) {
+        ls->handler(c);
+    }
 
     return NGX_OK;
 }

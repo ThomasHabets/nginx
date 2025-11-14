@@ -497,7 +497,8 @@ void ngx_event_accept(ngx_event_t *ev);
 ngx_int_t ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s, int type,
     struct sockaddr *sockaddr, socklen_t socklen,
     struct sockaddr *local_sockaddr, socklen_t local_socklen,
-    ngx_uint_t local_copy, ngx_event_conf_t *ecf);
+    ngx_uint_t local_copy, ngx_event_conf_t *ecf,
+    ngx_connection_t **pconn, ngx_uint_t defer_handler);
 ngx_int_t ngx_trylock_accept_mutex(ngx_cycle_t *cycle);
 ngx_int_t ngx_enable_accept_events(ngx_cycle_t *cycle);
 u_char *ngx_accept_log_error(ngx_log_t *log, u_char *buf, size_t len);
