@@ -51,8 +51,21 @@ size_t ngx_set_srcaddr_cmsg(struct cmsghdr *cmsg,
     struct sockaddr *local_sockaddr);
 ngx_int_t ngx_get_srcaddr_cmsg(struct cmsghdr *cmsg,
     struct sockaddr *local_sockaddr);
-
 #endif
+
+#if (NGX_HAVE_MSGHDR_MSG_CONTROL && NGX_HAVE_ADDRINFO_CMSG)
+#define NGX_UDP_CMSG_ADDRINFO_SIZE  CMSG_SPACE(sizeof(ngx_addrinfo_t))
+#else
+#define NGX_UDP_CMSG_ADDRINFO_SIZE  0
+#endif
+
+#if (NGX_HAVE_MSGHDR_MSG_CONTROL && NGX_HAVE_UNIX_DOMAIN)
+#define NGX_UDP_CMSG_RIGHTS_SIZE  CMSG_SPACE(sizeof(int))
+#else
+#define NGX_UDP_CMSG_RIGHTS_SIZE  0
+#endif
+
+#define NGX_UDP_CMSG_SIZE  (NGX_UDP_CMSG_ADDRINFO_SIZE + NGX_UDP_CMSG_RIGHTS_SIZE)
 
 void ngx_event_recvmsg(ngx_event_t *ev);
 ssize_t ngx_sendmsg(ngx_connection_t *c, struct msghdr *msg, int flags);
