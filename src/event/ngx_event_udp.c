@@ -121,8 +121,8 @@ ngx_event_recvmsg(ngx_event_t *ev)
             struct cmsghdr           *cmsg;
             ngx_socket_t              passed_fd;
             int                       fd;
-            struct sockaddr_storage   ps, lsock;
-            socklen_t                 plen, llen;
+            struct sockaddr_storage   ps;
+            socklen_t                 plen;
 
             passed_fd = (ngx_socket_t) -1;
 
@@ -173,19 +173,6 @@ ngx_event_recvmsg(ngx_event_t *ev)
                     continue;
                 }
 
-                llen = sizeof(lsock);
-                if (getsockname(passed_fd, (struct sockaddr *) &lsock, &llen)
-                    == -1)
-                {
-                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                                  "getsockname() failed for passed connection");
-                    if (ngx_close_socket(passed_fd) == -1) {
-                        ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                                      ngx_close_socket_n " failed");
-                    }
-                    continue;
-                }
-
 #if (NGX_STAT_STUB)
                 (void) ngx_atomic_fetch_add(ngx_stat_accepted, 1);
 #endif
@@ -195,8 +182,8 @@ ngx_event_recvmsg(ngx_event_t *ev)
 
                 if (ngx_event_accept_connection(ev, passed_fd, SOCK_STREAM,
                                                 (struct sockaddr *) &ps, plen,
-                                                (struct sockaddr *) &lsock,
-                                                llen, 1, ecf)
+                                                ls->sockaddr, ls->socklen,
+                                                0, ecf)
                     != NGX_OK)
                 {
                     return;
