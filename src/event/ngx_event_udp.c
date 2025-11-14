@@ -180,20 +180,52 @@ ngx_event_recvmsg(ngx_event_t *ev)
                 ngx_accept_disabled = ngx_cycle->connection_n / 8
                                       - ngx_cycle->free_connection_n;
 
+                ngx_connection_t  *ac;
+
+                ac = NULL;
+
                 if (ngx_event_accept_connection(ev, passed_fd, SOCK_STREAM,
                                                 (struct sockaddr *) &ps, plen,
                                                 ls->sockaddr, ls->socklen,
-                                                0, ecf)
+                                                0, ecf, &ac, 1)
                     != NGX_OK)
                 {
                     return;
                 }
 
+                if (n > 0) {
+                    ngx_buf_t  *b;
+
+                    b = ac->buffer;
+
+                    if (b == NULL
+                        || (size_t) (b->end - b->start) < (size_t) n)
+                    {
+                        b = ngx_create_temp_buf(ac->pool, n);
+                        if (b == NULL) {
+                            ngx_close_connection(ac);
+                            continue;
+                        }
+
+                        ac->buffer = b;
+                    }
+
+                    b->pos = b->start;
+                    b->last = ngx_cpymem(b->pos, buffer, n);
+
+                    ac->read->ready = 1;
+#if (NGX_HAVE_KQUEUE || NGX_HAVE_EPOLLRDHUP)
+                    ac->read->available = n;
+#endif
+                }
+
+                ls->handler(ac);
+
                 if (ngx_event_flags & NGX_USE_KQUEUE_EVENT) {
                     ev->available--;
                 }
 
-                continue;
+                goto next;
             }
         }
 #endif
