@@ -4069,10 +4069,10 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
 #if (NGX_HAVE_UNIX_DOMAIN)
-        if (ngx_strcmp(value[n].data, "unix_dgram") == 0) {
+        if (ngx_strcmp(value[n].data, "send_fd") == 0) {
             if (u.family != AF_UNIX) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "\"unix_dgram\" parameter is only "
+                                   "\"send_fd\" parameter is only "
                                    "valid for unix domain sockets");
                 return NGX_CONF_ERROR;
             }

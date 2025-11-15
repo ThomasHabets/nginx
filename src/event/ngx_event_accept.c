@@ -15,11 +15,6 @@ static ngx_int_t ngx_disable_accept_events(ngx_cycle_t *cycle, ngx_uint_t all);
 static void ngx_reorder_accept_events(ngx_listening_t *ls);
 #endif
 static void ngx_close_accepted_connection(ngx_connection_t *c);
-ngx_int_t ngx_event_accept_connection(ngx_event_t *ev, ngx_socket_t s,
-    int type, struct sockaddr *sockaddr, socklen_t socklen,
-    struct sockaddr *local_sockaddr, socklen_t local_socklen,
-    ngx_uint_t local_copy, ngx_event_conf_t *ecf,
-    ngx_connection_t **pconn, ngx_uint_t defer_handler);
 
 
 void
