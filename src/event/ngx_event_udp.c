@@ -195,18 +195,34 @@ ngx_event_recvmsg(ngx_event_t *ev)
 
                 if (n > 0) {
                     ngx_buf_t  *b;
+                    size_t      size, need;
 
                     b = ac->buffer;
 
-                    if (b == NULL
-                        || (size_t) (b->end - b->start) < (size_t) n)
+                    size = (b ? (size_t) (b->end - b->start) : 0);
+                    need = (size_t) n;
+
+                    if ((size == 0 || size - n < 1024)
+                        || size < need)
                     {
-                        b = ngx_create_temp_buf(ac->pool, n);
-                        if (b == NULL) {
+                        size_t  cap;
+                        ngx_buf_t  *nb;
+
+                        cap = ls->post_accept_buffer_size;
+                        if (cap < need + 1024) {
+                            cap = need + 1024;
+                        }
+                        if (cap < (size_t) ngx_pagesize) {
+                            cap = ngx_pagesize;
+                        }
+
+                        nb = ngx_create_temp_buf(ac->pool, cap);
+                        if (nb == NULL) {
                             ngx_close_connection(ac);
                             continue;
                         }
 
+                        b = nb;
                         ac->buffer = b;
                     }
 
